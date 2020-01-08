@@ -19,10 +19,12 @@ from math import sin, cos
 # from tqdm import tqdm
 
 device = "cuda"
-SWITCH_LOSS_EPOCH = 5
 IMG_WIDTH = 512
 IMG_HEIGHT = 512
 MODEL_SCALE = 8
+
+flip_rate = 0.1
+flip = False
 
 PATH = "./dataset/"
 train_pd = pd.read_csv(PATH + 'train_remove.csv')
@@ -163,6 +165,7 @@ trans_test = transforms.Compose([
 class ADDataset(Dataset):
     def __init__(self,data_len=None, is_validate=False,validate_rate=None,indices=None):
         self.is_validate = is_validate
+#         self.data = global_car_data
         if data_len == None:
             data_len = len(self.data)
         
@@ -177,18 +180,31 @@ class ADDataset(Dataset):
             self.transform = trans
         
     def __getitem__(self, idx):
+#         print(idx)
         idx += self.offset
         idx = self.indices[idx]
         img = cv2.imread('./dataset/masked_train/' + train_pd['ImageId'].iloc[idx] + '.jpg')
         img = np.array(img[:,:,::-1])
+        
+        flip = True if np.random.random()>flip_rate else False
 
-        mask, regr = get_mask_and_regr(img, train_pd['PredictionString'][idx])
-        img_pre = preprocess_image(img)  #shape(batch,512,512), #range: [0~1]
+        mask, regr = get_mask_and_regr(img, train_pd['PredictionString'][idx],flip=flip)
+        img_pre = preprocess_image(img,flip)  #shape(batch,512,512), #range: [0~1]
         
         img_pil = (img_pre*255).astype('uint8')
         img_pil = Image.fromarray(img_pil)  #ndarray: Take uint8 as input, range[0~255], #imgpil -> (512,512,3), (0~255)
         img_pre_trans = self.transform(img_pil)
+        
+#         print(np.shape(img))        #(2710, 3384, 3)
+#         print(np.shape(img_pre))    #(320, 1024, 3)
+#         print(np.shape(mask))       #(40, 128)
+#         print(np.shape(regr))       #(40, 128,7)
+        
         regr = np.transpose(regr,(2,0,1))
+        
+#         label = torch.as_tensor(label, dtype=torch.uint8)    #value: 0~9, shape(1)
+#         img_pre = torch.as_tensor(img_pre, dtype=torch.float32) #For distribution computing
+
         return img_pre_trans, mask, regr
 
     def __len__(self):
@@ -213,47 +229,65 @@ class TestDataset(Dataset):
         return self.len
 
 
+### prediction 1-7: ['pitch_cos', 'pitch_sin', 'roll', 'x', 'y', 'yaw', 'z']
 from CenterNet.src.lib.models.losses import FocalLoss, RegL1Loss, RegLoss, RegWeightedL1Loss, RegLoss_without_ind
 f_loss = FocalLoss()
 l1_loss = RegLoss_without_ind()
 
-def criterion_new(prediction, mask, regr, weight=0.5, result_average=True):
-    pred_mask = torch.sigmoid(prediction[:, 0])
-    mask_loss = f_loss(pred_mask, mask)
+def gaussian_filter(a):
+    b = torch.nn.MaxPool2d(3,stride=1,padding=1)(a)
+    eq = torch.eq(a,b).float()
+    a = a*eq
+    return a
 
-    pred_regr = prediction[:, 1:]
-    regr_loss = l1_loss(pred_regr,regr,mask)
+### prediction 1-7: ['pitch_cos', 'pitch_sin', 'roll', 'x', 'y', 'yaw', 'z']
+from CenterNet.src.lib.models.losses import FocalLoss, RegL1Loss, RegLoss, RegWeightedL1Loss, RegLoss_without_ind
+f_loss = FocalLoss()
+l1_loss = RegLoss_without_ind()
+
+def gaussian_filter(a):
+    with torch.no_grad():
+        b = torch.nn.MaxPool2d(3,stride=1,padding=1)(a)
+        eq = torch.eq(a,b).float()
+        a = a*eq
+        return a
+
+def criterion_new(pred, mask, regr, weight=0.5, result_average=True, multiloss=False):
+    #pred:(batch,8,64,64) mask:(batch,64,64) regr:(batch,7,64,64)
+    scalar = 0.1
     
-    # Regression L1 loss
-    # pred_regr = prediction[:, 1:]
-    # regr_loss = (torch.abs(pred_regr - regr).sum(1) * mask).sum(1).sum(1) / mask.sum(1).sum(1)
-    # regr_loss = regr_loss.mean(0)
+#     pred_mask = torch.sigmoid(pred[:, 0])
+    pred_mask = torch.clamp(torch.sigmoid(pred[:, 0]), min=1e-6, max=1-1e-6) #(batch,64,64)
+    pred_mask = pred_mask.unsqueeze(1)
+    gaussian_pred = gaussian_filter(pred_mask)
     
-    # Sum
-    loss = weight*mask_loss +(1-weight)* regr_loss
+#     gaussian_pred = pred_mask
+    mask_loss = scalar*f_loss(gaussian_pred, mask.unsqueeze(1))
+
+#     print(regr.size()) #(batch,7,64,64)
+#     print(pred.size()) #(batch,8,64,64), pred[:,1] ->(batch,64,64) ; pred[:,1:3] ->(batch,2,64,64)
+    ### task A 训练的收敛后，再把 A 和 B join 到一起训练
+    if multiloss:
+        pred_xyz = torch.cat((pred[:,4].unsqueeze(1),pred[:,5].unsqueeze(1),pred[:,7].unsqueeze(1)), 1)
+        pred_rollyaw = torch.cat((pred[:,3].unsqueeze(1),pred[:,6].unsqueeze(1)), 1)
+        pred_pitch = torch.cat((pred[:,1].unsqueeze(1),pred[:,2].unsqueeze(1)), 1)
+        
+        gt_xyz = torch.cat((regr[:,3].unsqueeze(1),regr[:,4].unsqueeze(1),regr[:,6].unsqueeze(1)), 1)
+        gt_rollyaw = torch.cat((regr[:,2].unsqueeze(1),regr[:,5].unsqueeze(1)), 1)
+        gt_pitch = torch.cat((regr[:,0].unsqueeze(1),regr[:,1].unsqueeze(1)), 1)
+        
+        xyz_loss = scalar*l1_loss(pred_xyz,gt_xyz,mask)
+        rollyaw_loss = scalar*l1_loss(pred_rollyaw,gt_rollyaw,mask)
+        pitch_loss = scalar*l1_loss(pred_pitch,gt_pitch,mask)
+        loss = mask_loss + xyz_loss + rollyaw_loss + pitch_loss
+    else:
+        regr_loss = mask_loss
+        loss = mask_loss
+
     if not result_average:
-        loss *= prediction.shape[0]
-    return loss ,mask_loss , regr_loss
-
-
-def criterion(prediction, mask, regr,weight=0.4, result_average=True):
-    # Binary mask loss
-    pred_mask = torch.sigmoid(prediction[:, 0])
-#     mask_loss = mask * (1 - pred_mask)**2 * torch.log(pred_mask + 1e-12) + (1 - mask) * pred_mask**2 * torch.log(1 - pred_mask + 1e-12)
-    mask_loss = mask * torch.log(pred_mask + 1e-12) + (1 - mask) * torch.log(1 - pred_mask + 1e-12)
-    mask_loss = -mask_loss.mean(0).sum()
-    
-    # Regression L1 loss
-    pred_regr = prediction[:, 1:]
-    regr_loss = (torch.abs(pred_regr - regr).sum(1) * mask).sum(1).sum(1) / mask.sum(1).sum(1)
-    regr_loss = regr_loss.mean(0)
-  
-    # Sum
-    loss = weight*mask_loss +(1-weight)* regr_loss
-    if not result_average:
-        loss *= prediction.shape[0]
-    return loss ,mask_loss , regr_loss
-
+        loss *= pred.shape[0]
+        
+    return loss ,mask_loss , xyz_loss, rollyaw_loss, pitch_loss
 
 
 from efficientnet_pytorch import EfficientNet
@@ -315,10 +349,10 @@ class MyUNet(nn.Module):
     '''Mixture of previous classes'''
     def __init__(self, n_classes):
         super(MyUNet, self).__init__()
-#         self.base_model = EfficientNet.from_pretrained('efficientnet-b0')
+        # self.base_model = EfficientNet.from_pretrained('efficientnet-b0')
         # self.base_model = EfficientNet.from_pretrained('efficientnet-b4')
-        self.base_model = EfficientNet.from_pretrained('efficientnet-b5')
-        # self.base_model = EfficientNet.from_pretrained('efficientnet-b7')
+        # self.base_model = EfficientNet.from_pretrained('efficientnet-b5')
+        self.base_model = EfficientNet.from_pretrained('efficientnet-b7')
         
         self.conv0 = double_conv(5, 128)
         self.conv1 = double_conv(128, 256)
@@ -326,23 +360,23 @@ class MyUNet(nn.Module):
         self.conv3 = double_conv(512, 1024)
         
         self.mp = nn.MaxPool2d(2)
-        self.dp = nn.Dropout(0.4)
+        self.dp = nn.Dropout(0.5)
         
         ###eff-b0
-#         self.up1 = up(1282 + 1024, 512)
-#         self.up2 = up(512 + 512, 256)
+        # self.up1 = up(1282 + 1024, 512)
+        # self.up2 = up(512 + 512, 256)
         
         ###eff-b4
         # self.up1 = up(1794 + 1024, 512)
         # self.up2 = up(512 + 512, 256)
 
         ###eff-b5
-        self.up1 = up(2050 + 1024, 512)
-        self.up2 = up(512 + 512, 256)  
+        # self.up1 = up(2050 + 1024, 512)
+        # self.up2 = up(512 + 512, 256)  
 
         ###eff-b7
-        # self.up1 = up(2562 + 1024, 512)
-        # self.up2 = up(512 + 512, 256)
+        self.up1 = up(2562 + 1024, 512)
+        self.up2 = up(512 + 512, 256)
         
         
         self.outc = nn.Conv2d(256, n_classes, 1)
@@ -384,7 +418,7 @@ class MyUNet(nn.Module):
 if __name__=='__main__':
     vr = 0.1
     batch_size = 4
-    num_workers = 12
+    num_workers = 8
     train_pd = pd.read_csv("./dataset/train_remove.csv")
     indices_len = len(train_pd)
     print("len of train indices:",indices_len)
@@ -405,59 +439,124 @@ if __name__=='__main__':
 
     lr = 1e-4
     lr_period = 5
-    epochs = 50
+    epochs = 400
     val_freq = 1
 
     # optimizer = torch.optim.Adam(model.parameters(),lr=lr,betas=(0.9,0.99))
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
-    # optimizer = adabound.AdaBound(model.parameters(), lr=lr, final_lr=1e-2)
+    # optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+    # optimizer = adabound.AdaBound(model.parameters(), lr=lr, final_lr=1e-1)
     # optimizer = torch.optim.SGD(model.parameters(), lr=lr, momentum=0.9)
-    # optimizer = torch.optim.RMSprop(model.parameters(), lr=lr, alpha=0.9,)
-    
-    lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, verbose=True, patience=10,factor=0.1)
+    optimizer = torch.optim.RMSprop(model.parameters(), lr=lr, alpha=0.9)
+    lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, verbose=True, patience=15,factor=0.1)
     # lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=max(epochs, 10) * len(train_loader) // 3, gamma=0.1)
     # lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer,T_0=lr_period,T_mult=1,eta_min=1e-6) #original 
 
     min_loss = 100000
+    multiloss = True
+    loss_th = 2
     best_model_dict = None
 
-    for ep in range(1,epochs+1):
-        model.train()
-        print("Epoc:",ep)
-        for batch_idx, (img_batch, mask_batch, regr_batch) in enumerate(train_loader):
-            img_batch = img_batch.to(device)
-            mask_batch = mask_batch.to(device)
-            regr_batch = regr_batch.to(device)
-            optimizer.zero_grad()
-            output = model(img_batch)
-            loss, mask_loss , regr_loss = criterion_new(output, mask_batch, regr_batch)
-            loss.backward()
-            optimizer.step()
-        print('Epoch:{} lr:{:.5f} loss:{:.6f} mloss:{:.6f} rloss{:.6f}'.
-               format(ep,optimizer.param_groups[0]['lr'],loss.data,mask_loss.data,regr_loss.data))
-    #     lr_scheduler.step()
+for ep in range(1,epochs+1):
+    print("Ep",ep)
+    model.train()
+    train_sum = 0
+    ml_sum = 0
+    xyzl_sum = 0
+    ryl_sum = 0
+    pl_sum = 0
+    data_num = 0
+    
+    for batch_idx, (img_batch, mask_batch, regr_batch) in enumerate(train_loader):
+        img_batch = img_batch.to(device)
+        mask_batch = mask_batch.to(device)
+        regr_batch = regr_batch.to(device)
+        optimizer.zero_grad()
 
-        if ep%val_freq==0:
-            model.eval()
-            val_loss = 0
-            data_num = 0
-            with torch.no_grad():
-                for img_batch, mask_batch, regr_batch in val_loader:
-                    img_batch = img_batch.to(device)
-                    mask_batch = mask_batch.to(device)
-                    regr_batch = regr_batch.to(device)
-                    output = model(img_batch)
-                    val_loss += criterion_new(output, mask_batch, regr_batch, result_average=False)[0].data
-                    img_batch.size()
-                    data_num += img_batch.size(0)
-                    
-            val_loss /= data_num
-            print('Val loss: {:.5f}'.format(val_loss))
-            
-            lr_scheduler.step(val_loss)
-            
-            if val_loss < min_loss:
-                min_loss = val_loss
-                best_model_dict = model.state_dict()
-                print("./saved_model/adamW_efforiginb5_512x512_Ep:{}_loss{:.4f}".format(ep,min_loss))
-                torch.save(best_model_dict, "./saved_model/adamW_efforiginb5_512x512_newloss_Ep{}_loss{:.4f}".format(ep,min_loss))
+#         print(img_batch.size())  #(batch,3,512,2048)
+#         print(mask_batch.size()) #(batch,64,256)
+#         print(regr_batch.size()) #(batch,7,64,256)
+        output = model(img_batch)
+#         print(output.size())    #(batch,8,64,256)
+
+        loss,mask_loss ,xyz_loss,ry_loss,p_loss  = criterion_new(output, mask_batch, regr_batch, multiloss=multiloss)
+        train_sum += loss.data
+        ml_sum += mask_loss.data
+        xyzl_sum += xyz_loss.data
+        ryl_sum += ry_loss.data
+        pl_sum += p_loss.data        
+        # if loss.item()<=loss_th:
+        #     multiloss = True
+        # else:
+        #     multiloss = False
+#         print(loss.item())
+#         print(mask_loss.item())
+#         print(regr_loss.item())
+        loss.backward()
+        optimizer.step()
+        data_num += 1
+
+    train_sum /= data_num
+    ml_sum /= data_num
+    xyzl_sum /= data_num
+    ryl_sum /= data_num
+    pl_sum /= data_num
+    print('Epoch:{} lr:{:.5f} loss:{:.5f} mloss:{:.5f} xyzloss{:.5f}  ryloss{:.5f} ploss{:.5f}'.
+          format(ep,optimizer.param_groups[0]['lr'],train_sum,ml_sum,xyzl_sum,ryl_sum,pl_sum))
+#     lr_scheduler.step()
+
+    if ep%val_freq==0:
+        model.eval()
+        val_sum = 0
+        ml_sum = 0
+        xyzl_sum = 0
+        ryl_sum = 0
+        pl_sum = 0
+
+        data_num = 0
+        with torch.no_grad():
+            for img_batch, mask_batch, regr_batch in val_loader:
+                img_batch = img_batch.to(device)
+                mask_batch = mask_batch.to(device)
+                regr_batch = regr_batch.to(device)
+                output = model(img_batch)
+                # val_loss += criterion_new(output, mask_batch, regr_batch, result_average=False,multiloss=True)[0].data
+                loss,mask_loss ,xyz_loss,ry_loss,p_loss = criterion_new(output, mask_batch, regr_batch, result_average=False, multiloss=multiloss)
+                val_sum += loss.data
+                ml_sum += mask_loss.data
+                xyzl_sum += xyz_loss.data
+                ryl_sum += ry_loss.data
+                pl_sum += p_loss.data
+
+                img_batch.size()
+                data_num += img_batch.size(0)
+                
+            val_sum /= data_num
+            ml_sum /= data_num
+            xyzl_sum /= data_num
+            ryl_sum /= data_num
+            pl_sum /= data_num
+
+        print('Val loss: {:.4f} Mask loss:{:.4f} xyz loss:{:.4f} rollyaw loss:{:.4f} pitch loss:{:.4f}'.
+        format(val_sum,ml_sum,xyzl_sum,ryl_sum,pl_sum))
+        prev_val_loss = val_sum
+        
+        lr_scheduler.step(val_sum)
+        
+        if val_sum < min_loss:
+            min_loss = val_sum
+            best_model_dict = model.state_dict()
+            path = "./saved_model/rmsprop_1e-4_b4_effb7_512x512_flip0.1_gaussion_multiloss_Ep{}_loss{:.4f}".format(ep,min_loss)
+            pos = path.find("Ep")
+            print(path)
+            torch.save(best_model_dict,path)
+        
+        path2 = path[:pos]+".current"
+        torch.save(model.state_dict(),path2)
+
+
+
+
+
+
+
+

@@ -46,19 +46,30 @@ def _neg_loss(pred, gt):
       pred (batch x c x h x w)
       gt_regr (batch x c x h x w)
   '''
+  alpha = 2
+  beta = 4
+
+#   alpha = 1.5
+#   beta = 2.5
+
   pos_inds = gt.eq(1).float()
   neg_inds = gt.lt(1).float()
 
-  neg_weights = torch.pow(1 - gt, 4)
+  neg_weights = torch.pow(1 - gt, beta)
 
   loss = 0
 
-  pos_loss = torch.log(pred) * torch.pow(1 - pred, 2) * pos_inds
-  neg_loss = torch.log(1 - pred) * torch.pow(pred, 2) * neg_weights * neg_inds
+  pos_loss = torch.log(pred+1e-12) * torch.pow(1 - pred, alpha) * pos_inds
+  neg_loss = torch.log(1 - (pred+1e-12)) * torch.pow(pred, alpha) * neg_weights * neg_inds
 
   num_pos  = pos_inds.float().sum()
+    
   pos_loss = pos_loss.sum()
   neg_loss = neg_loss.sum()
+    
+#   print("neg num_pos:",num_pos.item())
+#   print("pos loss:",pos_loss.item())
+#   print("neg loss:",neg_loss.item())
 
   if num_pos == 0:
     loss = loss - neg_loss
@@ -103,7 +114,6 @@ def _reg_loss(regr, gt_regr, mask):
   '''
 #   print("mask before unsqueeze:",mask.size())  #(1,64,64)
   num = mask.float().sum()
-#   mask = mask.unsqueeze(2).expand_as(gt_regr).float()
   mask = mask.unsqueeze(1).expand_as(gt_regr).float()
 
 #   print("mask shape:",mask.size())         #(1,7,64,64)
@@ -115,12 +125,12 @@ def _reg_loss(regr, gt_regr, mask):
     
 #   print("after gt regr shape:",gt_regr.size())    
     
-#   regr_loss = nn.functional.smooth_l1_loss(regr, gt_regr, reduction='sum')
-#   regr_loss = regr_loss / (num + 1e-4)
-#   regr_loss = regr_loss / (num + 1e-6)
-  
+  regr_loss = nn.functional.smooth_l1_loss(regr, gt_regr, reduction='sum')
+#   if num > 0:
+#     regr_loss = regr_loss / (num + 1e-4)
+    
   ###Try with mean (will be divided by batch_num)
-  regr_loss = nn.functional.smooth_l1_loss(regr, gt_regr, reduction='mean')
+#   regr_loss = nn.functional.smooth_l1_loss(regr, gt_regr, reduction='mean')
   
   return regr_loss
 
