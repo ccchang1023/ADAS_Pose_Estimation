@@ -19,12 +19,14 @@ from math import sin, cos
 # from tqdm import tqdm
 
 device = "cuda"
-IMG_WIDTH = 512
-IMG_HEIGHT = 512
+IMG_WIDTH = 1600
+IMG_HEIGHT = 360
 MODEL_SCALE = 8
 
-flip_rate = 0.1
+flip_rate = 0.5
 flip = False
+use_mesh = True
+use_bg = True
 
 PATH = "./dataset/"
 train_pd = pd.read_csv(PATH + 'train_remove.csv')
@@ -91,9 +93,12 @@ def _regr_back(regr_dict):
 
 def preprocess_image(img, flip=False):
     img = img[img.shape[0] // 2:]
-#     bg = np.ones_like(img) * img.mean(1, keepdims=True).astype(img.dtype)
-#     bg = bg[:, :img.shape[1] // 6]
-#     img = np.concatenate([bg, img, bg], 1)
+
+    if use_bg is True:
+        bg = np.ones_like(img) * img.mean(1, keepdims=True).astype(img.dtype)
+        bg = bg[:, :img.shape[1] // 4]
+        img = np.concatenate([bg, img, bg], 1)
+
     img = cv2.resize(img, (IMG_WIDTH, IMG_HEIGHT))
     if flip:
         img = img[:,::-1]
@@ -109,8 +114,10 @@ def get_mask_and_regr(img, labels, flip=False):
         x, y = y, x
         x = (x - img.shape[0] // 2) * IMG_HEIGHT / (img.shape[0] // 2) / MODEL_SCALE
         x = np.round(x).astype('int')
-#         y = (y + img.shape[1] // 6) * IMG_WIDTH / (img.shape[1] * 4/3) / MODEL_SCALE
-        y = (y) * IMG_WIDTH / (img.shape[1]) / MODEL_SCALE
+        if use_bg is True:
+            y = (y + img.shape[1] // 4) * IMG_WIDTH / (img.shape[1] * 1.5) / MODEL_SCALE
+        else:
+            y = (y) * IMG_WIDTH / (img.shape[1]) / MODEL_SCALE
         y = np.round(y).astype('int')
         if x >= 0 and x < IMG_HEIGHT // MODEL_SCALE and y >= 0 and y < IMG_WIDTH // MODEL_SCALE:
             mask[x, y] = 1
@@ -135,8 +142,19 @@ class ImgAugTransform:
 #         iaa.Sometimes(0.1, iaa.SaltAndPepper(0.05,False)),
 #         iaa.Invert(0.5),
 #         iaa.Add((-5, 5)), # change brightness of images (by -10 to 10 of original value)
+
         iaa.Sometimes(0.5, iaa.AdditiveGaussianNoise(0,0.01*255)),
         iaa.Sometimes(0.5,iaa.GammaContrast((0.3,1.5))),
+
+        ###strong aug
+        # iaa.Sometimes(0.5, iaa.AdditiveGaussianNoise(0,0.03*255)),
+        # iaa.Sometimes(0.5,iaa.GammaContrast((0.2,1.7))),
+
+        ###weak aug
+        # iaa.Sometimes(0.5, iaa.AdditiveGaussianNoise(0,0.003*255)),
+        # iaa.Sometimes(0.5,iaa.GammaContrast((0.6,1.2))),
+
+
 #         iaa.AddToHueAndSaturation(from_colorspace="RGB",value=(-20, 20))  #Hue-> color, saturation -> saido
     ])
     def __call__(self, img, mask=None):
@@ -145,7 +163,9 @@ class ImgAugTransform:
 #         return self.aug(image=img, segmentation_maps=label)
 
 trans = transforms.Compose([
-#         transforms.ColorJitter(0.,0.2,0.,0.),
+        ###Color jitter : brightness=0, contrast=0, saturation=0, hue=0
+        # transforms.ColorJitter(0.5,0.5,0.5,0.5),  ###strong aug  
+        # transforms.ColorJitter(0.1,0.0,0.1,0.1),  ###weak aug  
         ImgAugTransform(),
         lambda x: Image.fromarray(x),
         transforms.ToTensor(),
@@ -186,7 +206,10 @@ class ADDataset(Dataset):
         img = cv2.imread('./dataset/masked_train/' + train_pd['ImageId'].iloc[idx] + '.jpg')
         img = np.array(img[:,:,::-1])
         
-        flip = True if np.random.random()>flip_rate else False
+        if self.is_validate:
+            flip = False
+        else:
+            flip = True if np.random.random()>flip_rate else False
 
         mask, regr = get_mask_and_regr(img, train_pd['PredictionString'][idx],flip=flip)
         img_pre = preprocess_image(img,flip)  #shape(batch,512,512), #range: [0~1]
@@ -246,23 +269,28 @@ f_loss = FocalLoss()
 l1_loss = RegLoss_without_ind()
 
 def gaussian_filter(a):
-    with torch.no_grad():
-        b = torch.nn.MaxPool2d(3,stride=1,padding=1)(a)
-        eq = torch.eq(a,b).float()
-        a = a*eq
-        return a
+    b = torch.nn.MaxPool2d(3,stride=1,padding=1)(a)
+    eq = torch.eq(a,b).float()
+    a = a*eq
+    return a
 
 def criterion_new(pred, mask, regr, weight=0.5, result_average=True, multiloss=False):
     #pred:(batch,8,64,64) mask:(batch,64,64) regr:(batch,7,64,64)
-    scalar = 0.1
-    
-#     pred_mask = torch.sigmoid(pred[:, 0])
-    pred_mask = torch.clamp(torch.sigmoid(pred[:, 0]), min=1e-6, max=1-1e-6) #(batch,64,64)
+    scalar = 1
+
+    ###Peak    
+    # pred_mask = torch.sigmoid(pred[:, 0])
+    pred_mask = torch.clamp(torch.sigmoid(pred[:, 0]), min=1e-12, max=1-1e-12) #(batch,64,64)
+    # pred_mask = torch.clamp(torch.sigmoid(pred[:, 0]), min=1e-6, max=1-1e-6) #(batch,64,64)
     pred_mask = pred_mask.unsqueeze(1)
     gaussian_pred = gaussian_filter(pred_mask)
-    
-#     gaussian_pred = pred_mask
+    gaussian_pred = pred_mask
     mask_loss = scalar*f_loss(gaussian_pred, mask.unsqueeze(1))
+    
+    ###No focal
+    # pred_mask = torch.sigmoid(pred[:, 0])
+    # mask_loss = mask * torch.log(pred_mask + 1e-12) + (1 - mask) * torch.log(1 - pred_mask + 1e-12)
+    # mask_loss = -mask_loss.mean(0).sum()    
 
 #     print(regr.size()) #(batch,7,64,64)
 #     print(pred.size()) #(batch,8,64,64), pred[:,1] ->(batch,64,64) ; pred[:,1:3] ->(batch,2,64,64)
@@ -351,13 +379,23 @@ class MyUNet(nn.Module):
         super(MyUNet, self).__init__()
         # self.base_model = EfficientNet.from_pretrained('efficientnet-b0')
         # self.base_model = EfficientNet.from_pretrained('efficientnet-b4')
-        # self.base_model = EfficientNet.from_pretrained('efficientnet-b5')
-        self.base_model = EfficientNet.from_pretrained('efficientnet-b7')
+        self.base_model = EfficientNet.from_pretrained('efficientnet-b5')
+        # self.base_model = EfficientNet.from_pretrained('efficientnet-b7')
         
-        self.conv0 = double_conv(5, 128)
+        ###Revised model
+        if use_mesh == True:
+            self.conv0 = double_conv(5, 128)
+        else:
+            self.conv0 = double_conv(3, 128)
         self.conv1 = double_conv(128, 256)
         self.conv2 = double_conv(256, 512)
         self.conv3 = double_conv(512, 1024)
+
+        ###Origin model
+        # self.conv0 = double_conv(5, 64)
+        # self.conv1 = double_conv(64, 128)
+        # self.conv2 = double_conv(128, 512)
+        # self.conv3 = double_conv(512, 1024)
         
         self.mp = nn.MaxPool2d(2)
         self.dp = nn.Dropout(0.5)
@@ -371,24 +409,42 @@ class MyUNet(nn.Module):
         # self.up2 = up(512 + 512, 256)
 
         ###eff-b5
-        # self.up1 = up(2050 + 1024, 512)
-        # self.up2 = up(512 + 512, 256)  
+        if use_mesh == True:
+            self.up1 = up(2050 + 1024, 512)
+        else:
+            self.up1 = up(2048 + 1024, 512)
+        self.up2 = up(512 + 512, 256)  
 
         ###eff-b7
-        self.up1 = up(2562 + 1024, 512)
-        self.up2 = up(512 + 512, 256)
+        # if use_mesh == True:
+        #     self.up1 = up(2562 + 1024, 512)
+        # else:
+        #     self.up1 = up(2560 + 1024, 512)
+        # self.up2 = up(512 + 512, 256)
         
         
         self.outc = nn.Conv2d(256, n_classes, 1)
 
     def forward(self, x):
         batch_size = x.shape[0]
-        mesh1 = get_mesh(batch_size, x.shape[2], x.shape[3])
-        x0 = torch.cat([x, mesh1], 1)
+
+        if use_mesh == True:
+            mesh1 = get_mesh(batch_size, x.shape[2], x.shape[3])
+            x0 = torch.cat([x, mesh1], 1)
+        else:
+            x0 = x
+
+        ###Revised model
         x1 = self.dp(self.mp(self.conv0(x0)))
         x2 = self.dp(self.mp(self.conv1(x1)))
         x3 = self.dp(self.mp(self.conv2(x2)))
         x4 = self.dp(self.mp(self.conv3(x3)))
+
+        ###Origin model
+        # x1 = self.mp(self.conv0(x0))
+        # x2 = self.mp(self.conv1(x1))
+        # x3 = self.mp(self.conv2(x2))
+        # x4 = self.mp(self.conv3(x3))
         
 #         x_center = x[:, :, :, IMG_WIDTH // 8: -IMG_WIDTH // 8]
         x_center = x[:, :, :, :]
@@ -397,15 +453,15 @@ class MyUNet(nn.Module):
 #         print("eff extract size:",feats.size())
         
         ### Pad with zero (don't know why)
-#         bg = torch.zeros([feats.shape[0], feats.shape[1], feats.shape[2], feats.shape[3] // 8]).to(device)
-#         print("bg size:",bg.size())
-#         feats = torch.cat([bg, feats, bg], 3)
-#         print("feats size:",feats.size())
+        # bg = torch.zeros([feats.shape[0], feats.shape[1], feats.shape[2], feats.shape[3] // 8]).to(device)
+        # print("bg size:",bg.size())
+        # feats = torch.cat([bg, feats, bg], 3)
+        # print("feats size:",feats.size())
         
         # Add positional info
-        mesh2 = get_mesh(batch_size, feats.shape[2], feats.shape[3])
-#         print("mesh2 size:",mesh2.size())
-        feats = torch.cat([feats, mesh2], 1)
+        if use_mesh == True:
+            mesh2 = get_mesh(batch_size, feats.shape[2], feats.shape[3])
+            feats = torch.cat([feats, mesh2], 1)
         
         x = self.up1(feats, x4)
 #         print("up1 size:",x.size())
@@ -417,8 +473,15 @@ class MyUNet(nn.Module):
 
 if __name__=='__main__':
     vr = 0.1
-    batch_size = 4
-    num_workers = 8
+    batch_size = 2
+    num_workers = 12
+    lr = 5e-4
+    lr_period = 5
+    epochs = 300
+    val_freq = 1
+    model_ver = "./saved_model/adamW_5e-4_b2_effb5_1600x360_flip0.5_bgTrue_peak_clip1e-12_multiloss"
+    print(model_ver)
+
     train_pd = pd.read_csv("./dataset/train_remove.csv")
     indices_len = len(train_pd)
     print("len of train indices:",indices_len)
@@ -437,16 +500,14 @@ if __name__=='__main__':
     if device=='cuda':
         model.cuda()
 
-    lr = 1e-4
-    lr_period = 5
-    epochs = 400
-    val_freq = 1
+    ###Revenge
+    # model.load_state_dict(torch.load("./saved_model/200109_gaussian_failed/rmsprop_1e-4_b2_effb5_1536x320_flip0.3_peak_multiloss_Ep8_loss2.4502"))
 
     # optimizer = torch.optim.Adam(model.parameters(),lr=lr,betas=(0.9,0.99))
-    # optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
     # optimizer = adabound.AdaBound(model.parameters(), lr=lr, final_lr=1e-1)
     # optimizer = torch.optim.SGD(model.parameters(), lr=lr, momentum=0.9)
-    optimizer = torch.optim.RMSprop(model.parameters(), lr=lr, alpha=0.9)
+    # optimizer = torch.optim.RMSprop(model.parameters(), lr=lr, alpha=0.9)
     lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, verbose=True, patience=15,factor=0.1)
     # lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=max(epochs, 10) * len(train_loader) // 3, gamma=0.1)
     # lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer,T_0=lr_period,T_mult=1,eta_min=1e-6) #original 
@@ -488,9 +549,12 @@ for ep in range(1,epochs+1):
         #     multiloss = True
         # else:
         #     multiloss = False
-#         print(loss.item())
-#         print(mask_loss.item())
-#         print(regr_loss.item())
+        # print(loss.item())
+        # print(mask_loss.item())
+        # print(xyz_loss.item())
+        # print(ry_loss.item())
+        # print(p_loss.item())
+
         loss.backward()
         optimizer.step()
         data_num += 1
@@ -545,16 +609,13 @@ for ep in range(1,epochs+1):
         if val_sum < min_loss:
             min_loss = val_sum
             best_model_dict = model.state_dict()
-            path = "./saved_model/rmsprop_1e-4_b4_effb7_512x512_flip0.1_gaussion_multiloss_Ep{}_loss{:.4f}".format(ep,min_loss)
+            path = "{}_Ep{}_loss{:.4f}".format(model_ver,ep,min_loss)
             pos = path.find("Ep")
             print(path)
             torch.save(best_model_dict,path)
         
         path2 = path[:pos]+".current"
         torch.save(model.state_dict(),path2)
-
-
-
 
 
 
