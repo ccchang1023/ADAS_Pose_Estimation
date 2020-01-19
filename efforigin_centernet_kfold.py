@@ -130,28 +130,29 @@ def get_mask_and_regr(img, labels, flip=False):
 
 
 from imgaug import augmenters as iaa
-class ImgAugTransform:
-    def __init__(self):
-        self.aug = iaa.Sequential([
-        ###strong aug
-        # iaa.Sometimes(0.5, iaa.AdditiveGaussianNoise(0,0.03*255)),
-        # iaa.Sometimes(0.5,iaa.GammaContrast((0.2,1.7))),
-        ###weak aug
-        iaa.Sometimes(0.5, iaa.AdditiveGaussianNoise(0,0.01*255)),
-        iaa.Sometimes(0.5,iaa.GammaContrast((0.6,1.2))),
-        ])
-
-# class ImgAugTransform: ###Strong aug 2
+# class ImgAugTransform:
 #     def __init__(self):
 #         self.aug = iaa.Sequential([
-#         iaa.Sometimes(0.5, iaa.GaussianBlur(sigma=(0, 0.75))),
-# #         iaa.Sometimes(0.5, iaa.AverageBlur(1.2)),
-#         iaa.Sometimes(0.5,iaa.Sharpen(alpha=(0, 1.0), lightness=(0.65, 1.35))),
-# #         iaa.Sometimes(0.5, iaa.SaltAndPepper(0.01,False)),
-# #         iaa.Add((-5, 5)), # change brightness of images (by -10 to 10 of original value)
-#         iaa.Sometimes(0.5, iaa.AdditiveGaussianNoise(0,0.02*255)),
-#         iaa.Sometimes(0.5,iaa.GammaContrast((0.3,1.5))),
-#     ])
+#         ###strong aug
+#         # iaa.Sometimes(0.5, iaa.AdditiveGaussianNoise(0,0.03*255)),
+#         # iaa.Sometimes(0.5,iaa.GammaContrast((0.2,1.7))),
+
+#         ###weak aug
+#         # iaa.Sometimes(0.5, iaa.AdditiveGaussianNoise(0,0.01*255)),
+#         # iaa.Sometimes(0.5,iaa.GammaContrast((0.6,1.2))),
+#         ])
+
+class ImgAugTransform: ###Strong aug 2
+    def __init__(self):
+        self.aug = iaa.Sequential([
+        iaa.Sometimes(0.5, iaa.GaussianBlur(sigma=(0, 0.75))),
+#         iaa.Sometimes(0.5, iaa.AverageBlur(1.2)),
+        iaa.Sometimes(0.5,iaa.Sharpen(alpha=(0, 1.0), lightness=(0.65, 1.35))),
+#         iaa.Sometimes(0.5, iaa.SaltAndPepper(0.01,False)),
+#         iaa.Add((-5, 5)), # change brightness of images (by -10 to 10 of original value)
+        iaa.Sometimes(0.5, iaa.AdditiveGaussianNoise(0,0.02*255)),
+        iaa.Sometimes(0.5,iaa.GammaContrast((0.3,1.5))),
+    ])
 
     def __call__(self, img, mask=None):
         img = np.array(img)        
@@ -352,6 +353,7 @@ def criterion_v3(pred, mask, regr, weight=0.5, result_average=True, multiloss=Tr
     return loss ,mask_loss , xyz_loss, rollyaw_loss, pitch_loss
 
 
+
 from efficientnet_pytorch import EfficientNet
 import torch.nn as nn
 import torch.nn.functional as F
@@ -412,8 +414,8 @@ class MyUNet(nn.Module):
     def __init__(self, n_classes):
         super(MyUNet, self).__init__()
         # self.base_model = EfficientNet.from_pretrained('efficientnet-b0')
-        self.base_model = EfficientNet.from_pretrained('efficientnet-b4')
-        # self.base_model = EfficientNet.from_pretrained('efficientnet-b5')
+        # self.base_model = EfficientNet.from_pretrained('efficientnet-b4')
+        self.base_model = EfficientNet.from_pretrained('efficientnet-b5')
         # self.base_model = EfficientNet.from_pretrained('efficientnet-b7')
         
         ###Revised model
@@ -439,15 +441,15 @@ class MyUNet(nn.Module):
         # self.up2 = up(512 + 512, 256)
         
         ###eff-b4
-        self.up1 = up(1794 + 1024, 512)
-        self.up2 = up(512 + 512, 256)
+        # self.up1 = up(1794 + 1024, 512)
+        # self.up2 = up(512 + 512, 256)
 
         ###eff-b5
-        # if use_mesh == True:
-        #     self.up1 = up(2050 + 1024, 512)
-        # else:
-        #     self.up1 = up(2048 + 1024, 512)
-        # self.up2 = up(512 + 512, 256)  
+        if use_mesh == True:
+            self.up1 = up(2050 + 1024, 512)
+        else:
+            self.up1 = up(2048 + 1024, 512)
+        self.up2 = up(512 + 512, 256)  
 
         ###eff-b7
         # if use_mesh == True:
@@ -505,29 +507,59 @@ class MyUNet(nn.Module):
         return x
 
 
+
+def get_kfold_dataset_loader(k=5,val_rate=0.1,indices_len=None, batch_size=None,num_workers=None):
+    train_loader_list = []
+    val_loader_list = []
+    indices = np.arange(indices_len)
+    val_len = indices_len//k
+    idx = 0
+    for i in range(k):
+        ind = np.concatenate([indices[:idx],indices[idx+val_len:],indices[idx:idx+val_len]])
+        idx += val_len
+        
+        train_dataset = ADDataset(data_len=len(ind),is_validate=False,validate_rate=val_rate,indices=ind)
+        val_dataset = ADDataset(data_len=len(ind),is_validate=True,validate_rate=val_rate,indices=ind)
+        # train_dataset = ADDataset(data_len=50,is_validate=False,validate_rate=val_rate,indices=ind)
+        # val_dataset = ADDataset(data_len=50,is_validate=True,validate_rate=val_rate,indices=ind)        
+        
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
+        val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+        train_loader_list.append(train_loader)
+        val_loader_list.append(val_loader)
+    return train_loader_list, val_loader_list
+
+
 if __name__=='__main__':
-    vr = 0.1
+    # vr = 0.1
+    cv_nth = 0
     batch_size = 2
     num_workers = 8
-    lr = 2e-4
+    lr = 2.5e-4
     lr_period = 8
     epochs = 300
     val_freq = 1
-    model_ver = "./saved_model/rmsprop_2e-4_to_8e-6_b2_effb4_1500x320_flip0.5_strongAug2_peak_clip1e-8_multiloss"
+    model_ver = "./saved_model/Cross_validation_0119/fold{}_rmsprop_2.5e-4_b2_effb5_1700x360_strongAug2_flip0.5_bgTrue_peak_clip1e-8_multiloss".format(cv_nth)
     print(model_ver)
 
     train_pd = pd.read_csv("./dataset/train_remove.csv")
     indices_len = len(train_pd)
     indices = np.arange(indices_len)
-    train_dataset = ADDataset(data_len=indices_len,is_validate=False,validate_rate=vr,indices=indices)
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
-    val_dataset = ADDataset(data_len=indices_len,is_validate=True,validate_rate=vr,indices=indices)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
 
-    # from light_seg_model import get_segmentation_model
-    from AdaBound import adabound
-    # model = get_segmentation_model("efficientnet", dataset=train_dataset,aux=False, norm_layer=torch.nn.BatchNorm2d).to(device)
-    # model = get_segmentation_model("efficientnet_b7", dataset=train_dataset,aux=False, output_size=(64,64), norm_layer=torch.nn.BatchNorm2d).to(device)
+    # train_dataset = ADDataset(data_len=indices_len,is_validate=False,validate_rate=vr,indices=indices)
+    # train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
+    # val_dataset = ADDataset(data_len=indices_len,is_validate=True,validate_rate=vr,indices=indices)
+    # val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+
+    num_workers = 8
+    k = 10
+    # indices_len = 74340
+    vr = (indices_len//k)/indices_len
+    print("validation rate:",vr)
+    ###K-fold dataset
+    train_loaders, val_loaders = get_kfold_dataset_loader(k, vr, indices_len, batch_size, num_workers)
+    train_loader = train_loaders[cv_nth]
+    val_loader = val_loaders[cv_nth]
 
     model = MyUNet(8)
     if device=='cuda':
@@ -538,9 +570,9 @@ if __name__=='__main__':
     # optimizer = adabound.AdaBound(model.parameters(), lr=lr, final_lr=1e-1)
     # optimizer = torch.optim.SGD(model.parameters(), lr=lr, momentum=0.9)
     optimizer = torch.optim.RMSprop(model.parameters(), lr=lr, alpha=0.9)
-    # lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, verbose=True, patience=8,factor=0.1)
+    lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, verbose=True, patience=11,factor=0.1)
     # lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=max(epochs, 10) * len(train_loader) // 3, gamma=0.1)
-    lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer,T_0=lr_period,T_mult=1,eta_min=8e-6) #original 
+    # lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer,T_0=lr_period,T_mult=1,eta_min=8e-6) #original 
 
     min_loss = 100000
     multiloss = True
@@ -590,7 +622,7 @@ for ep in range(1,epochs+1):
         # xyz_loss.backward(retain_graph=True)
         # ry_loss.backward(retain_graph=True)
 
-        optimizer.step()
+        # optimizer.step()
         data_num += 1
 
     train_sum /= data_num
@@ -601,7 +633,6 @@ for ep in range(1,epochs+1):
     print('Epoch:{} lr:{:.5f} loss:{:.5f} mloss:{:.5f} xyzloss{:.5f}  ryloss{:.5f} ploss{:.5f}'.
           format(ep,optimizer.param_groups[0]['lr'],train_sum,ml_sum,xyzl_sum,ryl_sum,pl_sum))
 
-    ###Cosine Annealing          
     lr_scheduler.step()
 
     if ep%val_freq==0:
@@ -639,8 +670,7 @@ for ep in range(1,epochs+1):
         format(val_sum,ml_sum,xyzl_sum,ryl_sum,pl_sum))
         prev_val_loss = val_sum
         
-        ###ReduceLROnPlateau
-        # lr_scheduler.step(val_sum)
+        lr_scheduler.step(val_sum)
         
         if val_sum < min_loss:
             min_loss = val_sum
@@ -648,7 +678,12 @@ for ep in range(1,epochs+1):
             path = "{}_Ep{}_loss{:.4f}".format(model_ver,ep,min_loss)
             pos = path.find("Ep")
             print(path)
-            torch.save(best_model_dict,path)
+            if ep>=10:
+                torch.save(best_model_dict,path)
+        elif ep>=10 and ep%5 == 0:
+            path = "{}_Ep{}_loss{:.4f}".format(model_ver,ep,val_sum)
+            print(path)
+            torch.save(model.state_dict(),path)
         
         path2 = path[:pos]+".current"
         torch.save(model.state_dict(),path2)
