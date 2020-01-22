@@ -6,13 +6,18 @@ from torchvision import transforms, datasets
 import torchvision.models as models
 from torch.utils.data import DataLoader, Dataset
 from PIL import Image
+# from tqdm import tqdm
 # sys.path.remove('/opt/ros/kinetic/lib/python2.7/dist-packages')
 import cv2
+# import matplotlib.pyplot as plt
+
+# from torchsummary import summary
+# import seaborn
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 from scipy.optimize import minimize
 from math import sin, cos
-from mAp import get_mAp
+# from tqdm import tqdm
 
 device = "cuda"
 IMG_WIDTH = 1600
@@ -23,16 +28,9 @@ flip_rate = 0.5
 flip = False
 use_mesh = True
 use_bg = True
-bg_ratio = 4
 
 PATH = "./dataset/"
-global_csv = "train_remove.csv"
-# global_csv = "train_pseudo_cor_v3.csv"
-# global_csv = "train_pseudo_cor.csv"
-
-
-# train_pd = pd.read_csv(PATH + 'train_remove.csv')
-train_pd = pd.read_csv(PATH + global_csv)
+train_pd = pd.read_csv(PATH + 'train_remove.csv')
 test_pd = pd.read_csv(PATH + 'sample_submission.csv')
 camera_matrix = np.array([[2304.5479, 0,  1686.2379],
                           [0, 2305.8757, 1354.9849],
@@ -99,9 +97,7 @@ def preprocess_image(img, flip=False):
 
     if use_bg is True:
         bg = np.ones_like(img) * img.mean(1, keepdims=True).astype(img.dtype)
-        # bg = bg[:, :img.shape[1] // 4]
-        bg = bg[:, :img.shape[1] // bg_ratio]
-
+        bg = bg[:, :img.shape[1] // 4]
         img = np.concatenate([bg, img, bg], 1)
 
     img = cv2.resize(img, (IMG_WIDTH, IMG_HEIGHT))
@@ -120,8 +116,7 @@ def get_mask_and_regr(img, labels, flip=False):
         x = (x - img.shape[0] // 2) * IMG_HEIGHT / (img.shape[0] // 2) / MODEL_SCALE
         x = np.round(x).astype('int')
         if use_bg is True:
-            # y = (y + img.shape[1] // 4) * IMG_WIDTH / (img.shape[1] * 1.5) / MODEL_SCALE
-            y = (y + img.shape[1] // 4) * IMG_WIDTH / (img.shape[1] * (bg_ratio+2)/bg_ratio) / MODEL_SCALE
+            y = (y + img.shape[1] // 4) * IMG_WIDTH / (img.shape[1] * 1.5) / MODEL_SCALE
         else:
             y = (y) * IMG_WIDTH / (img.shape[1]) / MODEL_SCALE
         y = np.round(y).astype('int')
@@ -134,73 +129,55 @@ def get_mask_and_regr(img, labels, flip=False):
         regr = np.array(regr[:,::-1])
     return mask, regr
 
-
-points_df = pd.DataFrame()
-for col in ['x', 'y', 'z', 'yaw', 'pitch', 'roll']:
-    arr = []
-    for ps in train_pd['PredictionString']:
-        coords = str2coords(ps)
-        arr += [c[col] for c in coords]
-    points_df[col] = arr
-print('len(points_df)', len(points_df))
-
-xzy_slope = LinearRegression()
-X = points_df[['x', 'z']]     #Here x is width, y is heigth
-y = points_df['y']
-xzy_slope.fit(X, y)
-print('MAE with xzy:', mean_absolute_error(y, xzy_slope.predict(X)))
-print('dy/dx = {:.3f}\ndy/dz = {:.3f}'.format(*xzy_slope.coef_))
-
-import numpy
-numpy.random.bit_generator = numpy.random._bit_generator
+# import numpy
+# numpy.random.bit_generator = numpy.random._bit_generator
 
 from imgaug import augmenters as iaa
 class ImgAugTransform:
     def __init__(self):
         self.aug = iaa.Sequential([
+#         iaa.Scale((640, 480)),
+#         iaa.Fliplr(0.5),
+#         iaa.Sometimes(0.3, iaa.GaussianBlur(sigma=(0, 0.75))),
+#         iaa.Sometimes(0.1, iaa.AverageBlur(1.2)),
+#         iaa.Sometimes(1, iaa.Affine(rotate=(-20, 20),order=[0, 1],translate_px={"x":(-2, 2),"y":(-2,2)},mode='symmetric')),
+#         iaa.Sometimes(0.2,iaa.Sharpen(alpha=(0, 1.0), lightness=(0.75, 1.25))),
+#         iaa.Sometimes(0.1, iaa.SaltAndPepper(0.05,False)),
+#         iaa.Invert(0.5),
+#         iaa.Add((-5, 5)), # change brightness of images (by -10 to 10 of original value)
+
+        iaa.Sometimes(0.5, iaa.AdditiveGaussianNoise(0,0.01*255)),
+        iaa.Sometimes(0.5,iaa.GammaContrast((0.3,1.5))),
+
         ###strong aug
         # iaa.Sometimes(0.5, iaa.AdditiveGaussianNoise(0,0.03*255)),
         # iaa.Sometimes(0.5,iaa.GammaContrast((0.2,1.7))),
+
         ###weak aug
-        iaa.Sometimes(0.5, iaa.AdditiveGaussianNoise(0,0.01*255)),
-        iaa.Sometimes(0.5,iaa.GammaContrast((0.6,1.2))),
-        ])
+        # iaa.Sometimes(0.5, iaa.AdditiveGaussianNoise(0,0.003*255)),
+        # iaa.Sometimes(0.5,iaa.GammaContrast((0.6,1.2))),
 
-# class ImgAugTransform: ###Strong aug 2
-#     def __init__(self):
-#         self.aug = iaa.Sequential([
-#         iaa.Sometimes(0.5, iaa.GaussianBlur(sigma=(0, 0.75))),
-# #         iaa.Sometimes(0.5, iaa.AverageBlur(1.2)),
-#         iaa.Sometimes(0.5,iaa.Sharpen(alpha=(0, 1.0), lightness=(0.65, 1.35))),
-# #         iaa.Sometimes(0.5, iaa.SaltAndPepper(0.01,False)),
-# #         iaa.Add((-5, 5)), # change brightness of images (by -10 to 10 of original value)
-#         iaa.Sometimes(0.5, iaa.AdditiveGaussianNoise(0,0.02*255)),
-#         iaa.Sometimes(0.5,iaa.GammaContrast((0.3,1.5))),
-#     ])
 
+#         iaa.AddToHueAndSaturation(from_colorspace="RGB",value=(-20, 20))  #Hue-> color, saturation -> saido
+    ])
     def __call__(self, img, mask=None):
         img = np.array(img)        
         return self.aug.augment_image(image=img)
 #         return self.aug(image=img, segmentation_maps=label)
-#         iaa.AddToHueAndSaturation(from_colorspace="RGB",value=(-20, 20))  #Hue-> color, saturation -> saido
 
 trans = transforms.Compose([
         ###Color jitter : brightness=0, contrast=0, saturation=0, hue=0
         # transforms.ColorJitter(0.5,0.5,0.5,0.5),  ###strong aug  
-        transforms.ColorJitter(0.1,0.0,0.1,0.1),  ###weak aug, strong aug2
+        # transforms.ColorJitter(0.1,0.0,0.1,0.1),  ###weak aug  
         ImgAugTransform(),
         lambda x: Image.fromarray(x),
         transforms.ToTensor(),
-        # transforms.Normalize(mean=[0.2732385,0.28948802,0.31470126],std=[0.19721317,0.20766443,0.20611505])
-        transforms.Normalize(mean=[0.2714242,0.28780972,0.31313763],std=[0.19765591,0.20804157,0.20656212])###Pseudo_test+train
-
+        transforms.Normalize(mean=[0.2732385,0.28948802,0.31470126],std=[0.19721317,0.20766443,0.20611505])
     ])
 
 trans_val = transforms.Compose([
         transforms.ToTensor(),  #Take Image as input and convert to tensor with value from 0 to1
-        # transforms.Normalize(mean=[0.2732385,0.28948802,0.31470126],std=[0.19721317,0.20766443,0.20611505])
-        transforms.Normalize(mean=[0.2714242,0.28780972,0.31313763],std=[0.19765591,0.20804157,0.20656212])###Pseudo_test+train
-
+        transforms.Normalize(mean=[0.2732385,0.28948802,0.31470126],std=[0.19721317,0.20766443,0.20611505])
     ])
 
 trans_test = transforms.Compose([
@@ -230,7 +207,6 @@ class ADDataset(Dataset):
         idx += self.offset
         idx = self.indices[idx]
         img = cv2.imread('./dataset/masked_train/' + train_pd['ImageId'].iloc[idx] + '.jpg')
-        # img = cv2.imread('./dataset/masked_train_test/' + train_pd['ImageId'].iloc[idx] + '.jpg')
         img = np.array(img[:,:,::-1])
         
         if self.is_validate:
@@ -267,14 +243,18 @@ class TestDataset(Dataset):
         self.len = data_len
         
     def __getitem__(self, idx):
-        img = cv_read('./dataset/masked_test/{}.jpg'.format(test_pd['ImageId'].iloc[idx]))
+        img = cv2.imread('./dataset/masked_test/{}.jpg'.format(test_pd['ImageId'].iloc[idx]))
+        img_id = test_pd['ImageId'].iloc[idx]
+#         img = cv_read('./dataset/test/{}.jpg'.format(test_pd['ImageId'].iloc[idx]))
         
         img = np.array(img[:,:,::-1])
         img_pre = preprocess_image(img)  #shape(batch,512,512), #range: [0~1]
         img_pil = (img_pre*255).astype('uint8')
         img_pil = Image.fromarray(img_pil)  #ndarray: Take uint8 as input, range[0~255], #imgpil -> (512,512,3), (0~255)
         img_pre_trans = self.transform(img_pil)        
-        return img_pre_trans   #return img_pre_trans, _ will cause strange behavior (load very slow after 10 batch)
+
+        return img_pre_trans, img_id   #return img_pre_trans, _ will cause strange behavior (load very slow after 10 batch)
+
     def __len__(self):
         return self.len
 
@@ -307,9 +287,8 @@ def criterion_new(pred, mask, regr, weight=0.5, result_average=True, multiloss=F
 
     ###Peak    
     # pred_mask = torch.sigmoid(pred[:, 0])
-    # pred_mask = torch.clamp(torch.sigmoid(pred[:, 0]), min=1e-12, max=1-1e-12) #(batch,64,64)
-    # pred_mask = torch.clamp(torch.sigmoid(pred[:, 0]), min=1e-8, max=1-1e-8) #(batch,64,64)
-    pred_mask = torch.clamp(torch.sigmoid(pred[:, 0]), min=1e-6, max=1-1e-6) #(batch,64,64)
+    pred_mask = torch.clamp(torch.sigmoid(pred[:, 0]), min=1e-12, max=1-1e-12) #(batch,64,64)
+    # pred_mask = torch.clamp(torch.sigmoid(pred[:, 0]), min=1e-6, max=1-1e-6) #(batch,64,64)
     pred_mask = pred_mask.unsqueeze(1)
     gaussian_pred = gaussian_filter(pred_mask)
     gaussian_pred = pred_mask
@@ -345,6 +324,7 @@ def criterion_new(pred, mask, regr, weight=0.5, result_average=True, multiloss=F
         
     return loss ,mask_loss , xyz_loss, rollyaw_loss, pitch_loss
 
+
 from efficientnet_pytorch import EfficientNet
 import torch.nn as nn
 import torch.nn.functional as F
@@ -361,17 +341,6 @@ class double_conv(nn.Module):
             nn.ReLU(inplace=True),
             nn.BatchNorm2d(out_ch),
         )
-
-        # self.conv = nn.Sequential(
-        #     nn.Conv2d(in_ch, out_ch, 3, padding=1),
-        #     nn.LeakyReLU(0.05),
-        #     nn.BatchNorm2d(out_ch),
-        #     nn.Conv2d(out_ch, out_ch, 3, padding=1),
-        #     nn.LeakyReLU(0.05),
-        #     nn.BatchNorm2d(out_ch),
-        # )
-
-
 
     def forward(self, x):
         x = self.conv(x)
@@ -416,7 +385,6 @@ class MyUNet(nn.Module):
     def __init__(self, n_classes):
         super(MyUNet, self).__init__()
         # self.base_model = EfficientNet.from_pretrained('efficientnet-b0')
-        # self.base_model = EfficientNet.from_pretrained('efficientnet-b2')
         # self.base_model = EfficientNet.from_pretrained('efficientnet-b4')
         self.base_model = EfficientNet.from_pretrained('efficientnet-b5')
         # self.base_model = EfficientNet.from_pretrained('efficientnet-b7')
@@ -442,11 +410,7 @@ class MyUNet(nn.Module):
         ###eff-b0
         # self.up1 = up(1282 + 1024, 512)
         # self.up2 = up(512 + 512, 256)
-
-        ###eff-b2
-        # self.up1 = up(1410 + 1024, 512)
-        # self.up2 = up(512 + 512, 256)
-
+        
         ###eff-b4
         # self.up1 = up(1794 + 1024, 512)
         # self.up2 = up(512 + 512, 256)
@@ -512,13 +476,38 @@ class MyUNet(nn.Module):
 #         print("up2 size:",x.size())
         x = self.outc(x)
         return x
-
+    
 
 img = imread("./dataset/masked_train/{}.jpg".format(train_pd['ImageId'].iloc[0]))
 IMG_SHAPE = img.shape
-# DISTANCE_THRESH_CLEAR = 2
-opt_p1 = 0.3
-opt_p2 = 0.6
+DISTANCE_THRESH_CLEAR = 2.5
+
+
+def str2coords(s, names=['id', 'yaw', 'pitch', 'roll', 'x', 'y', 'z']):
+    coords = []
+    for l in np.array(s.split()).reshape([-1, 7]):
+        coords.append(dict(zip(names, l.astype('float'))))
+        if 'id' in coords[-1]:
+            coords[-1]['id'] = int(coords[-1]['id'])
+    return coords
+points_df = pd.DataFrame()
+for col in ['x', 'y', 'z', 'yaw', 'pitch', 'roll']:
+    arr = []
+    for ps in train_pd['PredictionString']:
+        coords = str2coords(ps)
+        arr += [c[col] for c in coords]
+    points_df[col] = arr
+print('len(points_df)', len(points_df))
+points_df.head(1)
+
+xzy_slope = LinearRegression()
+X = points_df[['x', 'z']]
+y = points_df['y']
+xzy_slope.fit(X, y)
+print('MAE with x:', mean_absolute_error(y, xzy_slope.predict(X)))
+
+print('\ndy/dx = {:.3f}\ndy/dz = {:.3f}'.format(*xzy_slope.coef_))
+
 
 def convert_3d_to_2d(x, y, z, fx = 2304.5479, fy = 2305.8757, cx = 1686.2379, cy = 1354.9849):
     # stolen from https://www.kaggle.com/theshockwaverider/eda-visualization-baseline
@@ -533,11 +522,10 @@ def optimize_xy(r, c, x0, y0, z0, flipped=False):
         y, x = x, y
         x = (x - IMG_SHAPE[0] // 2) * IMG_HEIGHT / (IMG_SHAPE[0] // 2) / MODEL_SCALE
         if use_bg is True:
-#             y = (y + IMG_SHAPE[1] // 4) * IMG_WIDTH / (IMG_SHAPE[1] * 1.5) / MODEL_SCALE
-            y = (y + IMG_SHAPE[1] // 4) * IMG_WIDTH / (IMG_SHAPE[1] * (bg_ratio+2)/bg_ratio) / MODEL_SCALE
+            y = (y + IMG_SHAPE[1] // 4) * IMG_WIDTH / (IMG_SHAPE[1] * 1.5) / MODEL_SCALE
         else:
             y = y * IMG_WIDTH / IMG_SHAPE[1] / MODEL_SCALE
-        return max(opt_p1, (x-r)**2 + (y-c)**2) + max(opt_p2, slope_err)
+        return max(0.2, (x-r)**2 + (y-c)**2) + max(0.4, slope_err)
     
     res = minimize(distance_fn, [x0, y0, z0], method='Powell')
     x_new, y_new, z_new = res.x
@@ -555,13 +543,16 @@ def clear_duplicates(coords):
     return [c for c in coords if c['confidence'] > 0]
 
 def extract_coords(prediction, flipped=False, logits_th=None, gt=False, peak_output=None):
+    ###prediction -> (batch,h,w)
     logits = prediction[0]
     regr_output = prediction[1:]
     if gt:
         points = np.argwhere(logits > 0)
         
     else:
-        points = np.argwhere(peak_output>logits_th)
+        points = np.argwhere(peak_output > 0)
+#         points = np.argwhere(peak_output[0]>logits_th)
+#         points = np.argwhere(logits > logits_th)
         
     col_names = sorted(['x', 'y', 'z', 'yaw', 'pitch_sin', 'pitch_cos', 'roll'])
     coords = []
@@ -584,253 +575,131 @@ def coords2str(coords, names=['yaw', 'pitch', 'roll', 'x', 'y', 'z', 'confidence
             s.append(str(c.get(n, 0)))
     return ' '.join(s)
 
-
-def get_kfold_dataset_loader(k=None,val_rate=None,indices_len=None, batch_size=None,num_workers=None):
-    train_loader_list = []
-    val_loader_list = []
-    indices = np.arange(indices_len)
-    val_len = indices_len//k
-    idx = 0
-    for i in range(k):
-        ind = np.concatenate([indices[:idx],indices[idx+val_len:],indices[idx:idx+val_len]])
-        idx += val_len
-        train_dataset = ADDataset(data_len=len(ind),is_validate=False,validate_rate=val_rate,indices=ind)
-        val_dataset = ADDataset(data_len=len(ind),is_validate=True,validate_rate=val_rate,indices=ind)
-        # train_dataset = ADDataset(data_len=100,is_validate=False,validate_rate=val_rate,indices=ind)
-        # val_dataset = ADDataset(data_len=100,is_validate=True,validate_rate=val_rate,indices=ind)
+def coords2str_pseudo_label(coords, img_id, names=['yaw', 'pitch', 'roll', 'x', 'y', 'z']):
+###train file: ['id', 'yaw', 'pitch', 'roll', 'x', 'y', 'z']
+    s = []
+    top_1_conf = str(coords[0].get('confidence', 0))
+    for c in coords:
+        s.append("10 ") #model id
+        for n in names:
+            s.append(str(c.get(n, 0)))
+    tmp_dict = {"top_1_confidence":top_1_conf, "predict_string":' '.join(s), "img_id":str(img_id)}
+#     print(len(s))
+#     print(s[:7])    
+    return tmp_dict
 
 
-        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
-        val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
-        train_loader_list.append(train_loader)
-        val_loader_list.append(val_loader)
-    return train_loader_list, val_loader_list
 
 if __name__=='__main__':
-    cv_nth = 9
-    batch_size = 2
-    num_workers = 2
-    lr = 1e-4
-    lr_period = 8
-    epochs = 300
-    val_freq = 1
-    # model_ver = "./saved_model/final_7folds_advanced/fold{}_rmsprop_5e-4_b2_effb5_1600x360_weakAug_flip0.5_bgTrue_peak_clip1e-6_multiloss".format(cv_nth)
-    model_root = "./best_model_to_test_0117_v3"
-    for name in os.listdir(model_root):
-        # if name.find("fold{}".format(cv_nth))!=-1:
-        if name.find("Ep50")!=-1:
-            model_ver = "{}/{}".format(model_root,name)
-            break
-    print(model_ver)
 
-    # train_pd = pd.read_csv("./dataset/train_remove.csv")
-    train_pd = pd.read_csv("./dataset/"+global_csv)
-    indices_len = len(train_pd)
-    indices = np.arange(indices_len)
-
-    num_workers = 8
-    k = 10
-    # k = 5
-    # indices_len = 74340
-    vr = (indices_len//k)/indices_len
-    print("validation rate:",vr)
-    ###K-fold dataset
-    train_loaders, val_loaders = get_kfold_dataset_loader(k, vr, indices_len, batch_size, num_workers)
-    train_loader = train_loaders[cv_nth]
-    val_loader = val_loaders[cv_nth]
-
-    model = MyUNet(8)
-    if device=='cuda':
+    # cv_fold = [0,1,2,3,4]
+    batch_size = 8
+    # model_root = "./best_model_to_test_0121_10fold/"
+    model_root = "./best_model_to_test_0117/"
+    ensemble_models = []
+    for file_name in os.listdir(model_root):
+        # if file_name.find("fold4")==-1:
+        #     continue
+        print(file_name)
+        model = MyUNet(8)
         model.cuda()
+        # model.load_state_dict(torch.load("./cv_models_0118/{}".format(file_name)))
+        model.load_state_dict(torch.load("{}/{}".format(model_root,file_name)))
+        model.eval()   #change behavior of batchnorm and dropout layer
+        ensemble_models.append(model)
 
-    model.load_state_dict(torch.load(model_ver))
+    model_num = len(ensemble_models)
+    predictions = []
+    pseudo_list = []
+    
+    test_pd = pd.read_csv("./dataset/sample_submission.csv")
+    indices_len = len(test_pd)
+    print("indices_len",indices_len)
+    test_dataset = TestDataset(data_len=indices_len)
+    # test_dataset = TestDataset(data_len=10)
+    test_loader = DataLoader(dataset=test_dataset, batch_size=batch_size, shuffle=False, num_workers=8)
+            
+    k = 18
+    with torch.no_grad():
+        # for img,img_id in tqdm(test_loader):
+        for img,img_id in test_loader:
+            b_num = img.size(0)
+            img = img.to(device)
 
-    # optimizer = torch.optim.Adam(model.parameters(),lr=lr,betas=(0.9,0.99))
-    # optimizer = torch.optim .AdamW(model.parameters(), lr=lr)
-    # optimizer = adabound.AdaBound(model.parameters(), lr=lr, final_lr=1e-1)
-    # optimizer = torch.optim.SGD(model.parameters(), lr=lr, momentum=0.9)
-    optimizer = torch.optim.RMSprop(model.parameters(), lr=lr, alpha=0.9)
-    lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, verbose=True, patience=8,factor=0.1)
-    # lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=max(epochs, 10) * len(train_loader) // 3, gamma=0.1)
-    # lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer,T_0=lr_period,T_mult=1,eta_min=8e-6) #original 
+            ###Average Ensemble
+            pred_list = torch.Tensor([]).to(device)
+            for i in range(model_num):
+                pred = ensemble_models[i](img) #(batch,8,h,w)
+                # print("size1",pred.size())
+                h,w = pred.size(2),pred.size(3)
+                pred = pred.view(b_num,8,-1) #(batch,8,hxw)
+                # print("size2",pred.size())
+                pred_list = torch.cat((pred_list,pred.unsqueeze(3)),dim=3) #pred_list: (batch_num,8,hxw,model_num)
+            output_tensor = torch.mean(pred_list,dim=3).view(b_num,8,h,w) #output_tensor (batch_num,8,h,w)
 
-    min_loss = 100000
-    max_mAp = 0
+            output = output_tensor.cpu().numpy()
+            peak_output = torch.sigmoid(output_tensor[:,0])
+            peak_output = (peak_output.float())
+            score, inds = torch.topk(peak_output.view(b_num,-1),k=k)  #score (8,40)
+            minScore, indc = score.min(dim=1)
+            minScore = minScore.unsqueeze(1)           #minScore (8,1)
+#             print(np.shape(minScore))
+            h,w = peak_output.size(1), peak_output.size(2)
+            peak_output = peak_output.view(b_num,-1)
+            peak_output = torch.where(peak_output>=minScore,peak_output,torch.zeros_like(peak_output))
+            peak_output = peak_output.view(b_num,h,w)
+            peak_output = peak_output.cpu().numpy()            
+            for idx,out in enumerate(output):     #out -> (8,h,w)
+                coords = extract_coords(out,logits_th=0,gt=False,peak_output=peak_output[idx])
+                coords =  sorted(coords, key = lambda i: i['confidence'],reverse=True)
+                s = coords2str(coords)
+                pseudo_dict = coords2str_pseudo_label(coords,img_id[idx]) ###dict {'confidence','predictString'}
+                predictions.append(s)    
+                pseudo_list.append(pseudo_dict)    
 
-    multiloss = True
-    loss_th = 2
-    best_model_dict = None
+    #     for ps in pseudo_list:
+    #         print(ps['top_1_confidence'])
+    #         print(ps['img_id'])
+        pseudo_list = sorted(pseudo_list, key = lambda i:i['top_1_confidence'], reverse=True)
+    #     for ps in pseudo_list:
+    #         print(ps['top_1_confidence'])
+    #         print(ps['img_id'])
+        final_label = []
+        for ps in pseudo_list:
+            tmp_data = [ps['img_id'],ps['predict_string']]
+            final_label.append(tmp_data)
+        final_label = np.array(final_label)
+        print("shape:",np.shape(final_label))
+        final_label = final_label[:1000,:]
 
-    for ep in range(1,epochs+1):
-        print("Ep",ep)
-        model.train()
-        train_sum = 0
-        ml_sum = 0
-        xyzl_sum = 0
-        ryl_sum = 0
-        pl_sum = 0
-        data_num = 0
+        numpy_header = "ImageId,PredictionString"
+        np.savetxt("./pseudo_output_cor.csv", final_label, delimiter=",",fmt="%s",header=numpy_header,comments='')
         
-        for batch_idx, (img_batch, mask_batch, regr_batch) in enumerate(train_loader):
-            img_batch = img_batch.to(device)
-            mask_batch = mask_batch.to(device)
-            regr_batch = regr_batch.to(device)
-            optimizer.zero_grad()
+        ###Combine with train
+        train_csv = np.array(pd.read_csv("./dataset/train_remove.csv")).astype(str)[:,1:]
+        test_csv = np.array(pd.read_csv("./pseudo_output_cor.csv")).astype(str)
+        print(np.shape(train_csv))
+        print(np.shape(test_csv))
+        new_csv = np.vstack([train_csv,test_csv])
+        np.random.shuffle(new_csv)  #Multi-dimensional arrays are only shuffled along the first axis:
+        np.random.shuffle(new_csv)
+        np.random.shuffle(new_csv)
+        print(np.shape(new_csv))
+        np.savetxt("./dataset/train_pseudo_cor.csv", new_csv, delimiter=",",fmt="%s",header=numpy_header,comments='')
+        print("Finish")
 
-    #         print(img_batch.size())  #(batch,3,512,2048)
-    #         print(mask_batch.size()) #(batch,64,256)
-    #         print(regr_batch.size()) #(batch,7,64,256)
-            output = model(img_batch)
-    #         print(output.size())    #(batch,8,64,256)
+        # test = pd.read_csv(PATH + 'sample_submission.csv')
+        # test['PredictionString']= predictions
+        # file_name = "0120_pred_k{}_dist{}.csv".format(k,dist)
+        # test.to_csv(file_name, index=False)
+        # test.head()      
 
-            loss,mask_loss ,xyz_loss,ry_loss,p_loss  = criterion_new(output, mask_batch, regr_batch, multiloss=multiloss)
-            # loss,mask_loss ,xyz_loss,ry_loss,p_loss  = criterion_v3(output, mask_batch, regr_batch, multiloss=multiloss)
-            train_sum += loss.data
-            ml_sum += mask_loss.data
-            xyzl_sum += xyz_loss.data
-            ryl_sum += ry_loss.data
-            pl_sum += p_loss.data
-
-            # if batch_idx%10==0:        
-            #     print('loss:{:.5f} mloss:{:.5f} xyzloss{:.5f} ryloss{:.5f} ploss{:.5f}'.
-            #     format(loss.data,mask_loss.data,xyz_loss.data,ry_loss.data,p_loss.data))
-
-            ###Way1
-            loss.backward()
-
-            optimizer.step()
-            data_num += 1
-
-        train_sum /= data_num
-        ml_sum /= data_num
-        xyzl_sum /= data_num
-        ryl_sum /= data_num
-        pl_sum /= data_num
-        print('Epoch:{} lr:{:.5f} loss:{:.5f} mloss:{:.5f} xyzloss{:.5f}  ryloss{:.5f} ploss{:.5f}'.
-            format(ep,optimizer.param_groups[0]['lr'],train_sum,ml_sum,xyzl_sum,ryl_sum,pl_sum))
-
-        ###Cosine Annealing          
-        # lr_scheduler.step()
-
-        if ep%val_freq==0:
-            ###Noraml validation
-            # model.eval()
-            # val_sum = 0
-            # ml_sum = 0
-            # xyzl_sum = 0
-            # ryl_sum = 0
-            # pl_sum = 0
-            # data_num = 0
-            # with torch.no_grad():
-            #     for img_batch, mask_batch, regr_batch in val_loader:
-            #         img_batch = img_batch.to(device)
-            #         mask_batch = mask_batch.to(device)
-            #         regr_batch = regr_batch.to(device)
-            #         output = model(img_batch)
-            #         loss,mask_loss ,xyz_loss,ry_loss,p_loss = criterion_new(output, mask_batch, regr_batch, result_average=True, multiloss=multiloss)
-            #         val_sum += loss.data
-            #         ml_sum += mask_loss.data
-            #         xyzl_sum += xyz_loss.data
-            #         ryl_sum += ry_loss.data
-            #         pl_sum += p_loss.data
-            #         img_batch.size()
-            #         data_num += 1
-                    
-            #     val_sum /= data_num
-            #     ml_sum /= data_num
-            #     xyzl_sum /= data_num
-            #     ryl_sum /= data_num
-            #     pl_sum /= data_num
-
-            # print('Val loss: {:.4f} Mask loss:{:.4f} xyz loss:{:.4f} rollyaw loss:{:.4f} pitch loss:{:.4f}'.
-            # format(val_sum,ml_sum,xyzl_sum,ryl_sum,pl_sum))
-            # prev_val_loss = val_sum
-            # ###ReduceLROnPlateau
-
-            # lr_scheduler.step(val_sum)
-            # if val_sum < min_loss:
-            #     min_loss = val_sum
-            #     best_model_dict = model.state_dict()
-            #     path = "{}_Ep{}_loss{:.4f}".format(model_ver,ep,min_loss)
-            #     pos = path.find("Ep")
-            #     if ep>=0:
-            #         print(path)
-            #         torch.save(best_model_dict,path)
-            # elif ep>=10 and ep%2 == 0:
-            #     path = "{}_Ep{}_loss{:.4f}".format(model_ver,ep,val_sum)
-            #     print(path)
-            #     torch.save(model.state_dict(),path)
-            # path2 = path[:pos]+".current"
-            # torch.save(model.state_dict(),path2)
+    # print(np.shape(predictions))
+    # test = pd.read_csv(PATH + 'sample_submission.csv')
+    # test['PredictionString']= predictions
+    # file_name = "final_pred_0121_10folds.csv"
+    # test.to_csv(file_name, index=False)
+    # test.head()        
 
 
-            ###mAp validation
-            print("Start mAp validation:")
-            # indices_len = len(train_pd)
-            # indices = np.arange(indices_len)
-            # batch_size = 12
-            # num_workers = 12
-            # # k = 5
-            # vr = round((indices_len//k)/indices_len,1)
-            # print("validation rate:",vr)
-            # train_loaders, val_loaders = get_kfold_dataset_loader(k, vr, indices_len, batch_size, num_workers)
 
-            topk = 18
-            dist = 2.5
-            test_model_root = "./best_model_to_test_0117_v3"
-            # model.load_state_dict(torch.load("{}/{}".format(test_model_root,path)))
-
-            model.eval()
-
-            val_len = indices_len//k
-            offset = cv_nth*val_len
-            val_pd = train_pd[offset:offset+val_len]
-            predictions = []
-            with torch.no_grad():
-                for img,_,_ in val_loader:
-                    b_num = img.size(0)
-                    img = img.to(device)
-                    output_tensor = model(img)
-                    output = output_tensor.cpu().numpy()  #(batch,8,h,w)
-                    peak_output = torch.sigmoid(output_tensor[:,0])
-                    peak_output = (peak_output.float())
-                    score, inds = torch.topk(peak_output.view(b_num,-1),k=topk)  #score (batch,k)
-                    minScore, indc = score.min(dim=1)   #minScore(batch,)
-                    minScore = minScore.unsqueeze(1)           #minScore (batch,1)
-                    h,w = peak_output.size(1), peak_output.size(2)
-                    peak_output = peak_output.view(b_num,-1)
-                    peak_output = torch.where(peak_output>=minScore,peak_output,torch.zeros_like(peak_output))
-                    peak_output = peak_output.view(b_num,h,w)
-                    peak_output = peak_output.cpu().numpy()            
-                    for idx,out in enumerate(output):     #out -> (8,h,w)
-                        DISTANCE_THRESH_CLEAR = dist
-                        coords = extract_coords(out,logits_th=0,gt=False,peak_output=peak_output[idx])
-                        coords =  sorted(coords, key = lambda i: i['confidence'],reverse=True)
-                        s = coords2str(coords)
-                        predictions.append(s)
-
-            pred_len = len(predictions)
-            v_len = len(val_pd)
-
-            print("pred shape:",np.shape(predictions))
-            print("v_len:",v_len)
-
-            val_pd = val_pd[:pred_len]
-
-            val_pd['PredictionString']= predictions
-            file_name = "{}.csv".format(cv_nth)
-            val_pd.to_csv(file_name, index=False)
-            mAp = get_mAp(file_name)
-            print('Val mAp:',mAp)
-
-            lr_scheduler.step(-1.*mAp)
-            if mAp >= max_mAp:
-                max_mAp = mAp
-                best_model_dict = model.state_dict()
-                path = "./saved_model/{}_Ep{}_mAp{:.4f}".format(cv_nth,ep,max_mAp)
-                print(path)            
-                torch.save(best_model_dict,path)
-            elif ep>=10 and ep%2 == 0:
-                path = "./saved_model/{}_Ep{}_mAp{:.4f}".format(cv_nth,ep,max_mAp)
-                print(path)
-                torch.save(model.state_dict(),path)
